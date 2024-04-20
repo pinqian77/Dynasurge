@@ -33,7 +33,15 @@ parser.add_argument('--Mode', type=str, default="greedy", help='tree mode')
 parser.add_argument('--offloading', action='store_true')
 args = parser.parse_args()
 
-alt_path = "../demo_tree.pt"
+alt_path = "/home/ubuntu/code/Sequoia/L40_growmaps/2x1-tree.pt"
+
+alt_grow_map = {
+    "roots":[[0], [1,2,3]],
+    "branches":[[3],[0,0,0]]
+}
+
+# alt_grow_map = torch.load(alt_path)
+
 
 print(args)
 def setup_seed(seed):
@@ -255,9 +263,6 @@ else:
     residual_graph = cuda_graph_for_residual()
     path = args.growmap
     grow_map = torch.load(path)
-
-    alt_grow_map = torch.load(alt_path)
-
     tree_size = grow_map["size"]
     idx_lists = grow_map["roots"]
     branch_lists = grow_map['branches']

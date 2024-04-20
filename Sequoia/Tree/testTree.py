@@ -101,7 +101,6 @@ class SpecInferTree(Tree):
         
         sampling_q = softmax(sampling_logits / self.temperature, dim=-1)
         
-            
         new_tokens_set = sampling_q.multinomial(num_samples=max_branch, replacement=True).flatten()
         self.tokens[self.num_nodes: self.num_nodes + total_branch] = new_tokens_set[self.sample_gather_indices[grow_step]]
         if benchmark:
@@ -250,6 +249,7 @@ class SpecInferTree(Tree):
 
         self.grow_map = grow_map
         self.grow_map_roots_gpu = []
+        self.draft_step = len(self.grow_map["roots"])
         for x in self.grow_map["roots"]:
              self.grow_map_roots_gpu.append(torch.Tensor(x).to(self.device).long())
         
