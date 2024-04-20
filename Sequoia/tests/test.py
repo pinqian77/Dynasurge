@@ -11,17 +11,18 @@ from accelerate import Accelerator
 import argparse
 from data_converter import convert_dataset, convert_wiki_dataset, convert_cnn_dataset, convert_c4_dataset_eval
 import argparse
-from Tree.SpecInferTree import SpecInferTree
+from Tree.testTree import SpecInferTree
 import time
 from utils import get_sampling_logits, _make_causal_mask, cuda_graph_for_residual
-from Engine.Engine import GraphInferenceEngine, GraphInferenceEngineTG
+from Engine.testEngine import *
 from Engine.offload_engine import OffloadEngine
 import random
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, help='model', default='JackFram/llama-68m')
 parser.add_argument('--target', type=str, help='target model', default='huggyllama/llama-7b')
 parser.add_argument('--dataset', type=str, default="cnn", help='dataset path')
-parser.add_argument('--growmap', type=str, default="../8x8-tree.pt", help='growmap path')
+parser.add_argument('--growmap', type=str, default="../demo_tree.pt", help='growmap path')
 parser.add_argument('--start', type=int, default=0, help='start')
 parser.add_argument('--end', type=int, default=200, help='end')
 parser.add_argument('--T', type=float, default=0.6, help='temperature')
@@ -31,6 +32,17 @@ parser.add_argument('--M', type=int, default=384, help='max length')
 parser.add_argument('--Mode', type=str, default="greedy", help='tree mode')
 parser.add_argument('--offloading', action='store_true')
 args = parser.parse_args()
+
+alt_path = "/home/ubuntu/code/Sequoia/L40_growmaps/2x1-tree.pt"
+
+alt_grow_map = {
+    "roots":[[0], [1,2,3]],
+    "branches":[[3],[0,0,0]]
+}
+
+# alt_grow_map = torch.load(alt_path)
+
+
 print(args)
 def setup_seed(seed):
      torch.manual_seed(seed)
@@ -77,7 +89,7 @@ def simulation_fast(target_model : GraphInferenceEngineTG, draft_model: GraphInf
             torch.cuda.synchronize()
             t1 = time.time()
             while input_ids.shape[1] < 256 and terminate == False:
-                spectree.construct_grow_map()
+                spectree.construct_grow_map(alt_grow_map)
                 valid_tokens, draft_kv_len, target_kv_len, terminate = spectree.verify()
                 
                 num_decoding_steps += (valid_tokens.shape[0] - input_ids.shape[1])
@@ -185,7 +197,7 @@ def simulation_benchmark(target_model : GraphInferenceEngineTG, draft_model: Gra
                 t1 = time.time()
                 torch.cuda.synchronize()
                 t2 = time.time()
-                a, b = spectree.construct_grow_map(benchmark=True)
+                a, b = spectree.construct_grow_map(alt_grow_map,benchmark=True)
                 torch.cuda.synchronize()
                 t3 = time.time()
                 valid_tokens, draft_kv_len, target_kv_len, x, y, z, terminate = spectree.verify(benchmark=True)
@@ -246,12 +258,11 @@ else:
         target_model = OffloadEngine(max_length=args.M, model_name_or_path = args.target, dtype = torch.float16, device="cuda:0")
     else:
         target_model =  GraphInferenceEngineTG(max_length=args.M, model_name_or_path = args.target, dtype = torch.float16, device="cuda:0", offloading=args.offloading)
-    graph_capture_list = list(range(1, 129))
-    draft_model.initialize_cuda_graph(graph_capture_list)
+    # graph_capture_list = list(range(1, 129))
+    # draft_model.initialize_cuda_graph(graph_capture_list)
     residual_graph = cuda_graph_for_residual()
     path = args.growmap
     grow_map = torch.load(path)
-
     tree_size = grow_map["size"]
     idx_lists = grow_map["roots"]
     branch_lists = grow_map['branches']
