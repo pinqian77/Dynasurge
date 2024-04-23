@@ -22,6 +22,18 @@ import ssl
 import urllib.request
 import os
 from time import sleep
+
+import debugpy
+try:
+    # Default host: localhost 127.0.0.1
+    # Default port: 5678
+    debugpy.listen(("localhost", 9501))
+    print("Waiting for Debugger Attach")
+    debugpy.wait_for_client()
+except Exception as e:
+    pass
+
+
 def download_url(url: str, folder="folder"):
     """
     Downloads the content of an url to a folder. Modified from \
@@ -71,9 +83,7 @@ def simulation_fast(target_model : InferenceEngine, draft_model: InferenceEngine
     total_time = 0.0
     dtype = torch.float16
     attn_mask = torch.full((max_length, max_length), torch.finfo(dtype).min, dtype=dtype, device='cuda:0')
-    sequence = torch.tensor(list(range(max_length)), device='cuda:0').long().unsqueeze(-1)
-    new_tokens_buffer =  None
-    parents_buffer =  None
+    # sequence = torch.tensor(list(range(max_length)), device='cuda:0').long().unsqueeze(-1)
     position_ids = torch.zeros(max_length).long().to('cuda:0')
     data_id = 0
     with torch.no_grad():
@@ -103,8 +113,8 @@ def simulation_fast(target_model : InferenceEngine, draft_model: InferenceEngine
                                     top_p=top_p,
                                     draft_kv_len=draft_kv_len, target_kv_len=target_kv_len,
                                     draft_model_engine=draft_model, target_model_engine=target_model, max_length=max_length, grow_map=grow_map,
-                                    attn_mask = attn_mask, sequence = sequence, new_tokens_buffer = new_tokens_buffer, 
-                                    parents_buffer = parents_buffer, 
+                                    attn_mask = attn_mask, 
+                                    # sequence = sequence, 
                                     position_ids = position_ids,
                                     residual_graph = residual_graph,
                                     sampling_callables=sampling_callables,
