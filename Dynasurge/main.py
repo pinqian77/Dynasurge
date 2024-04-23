@@ -44,6 +44,7 @@ def parse_arguments():
     parser.add_argument('--mode', type=str, default="sTree", help='tree mode') # support: (auto, sTree, dTree)
     args = parser.parse_args()
 
+    print("===================================================")
     print(args)
 
     return args
@@ -121,6 +122,5 @@ if __name__ == "__main__":
                 max_length=args.M, residual_graph = residual_graph, grow_map = grow_map, sampling_callables=sampling_callables, 
                 sample_gather_indices = sample_gather_indices)
         
-        print("Sequoia simulation completed.")
     elif args.mode == "dTree":
         pass

@@ -56,7 +56,7 @@ def Autoregressive(target_model : InferenceEngine, dataloader: DataLoader, T=0.6
         total_time += (t2 - t1)
         target_model.clear_kv()
             
-    print("total time :{:.5f}s, latency :{:.5f}s, decoding step: {}".format(total_time, total_time / num_decoding_steps, num_decoding_steps))
+    print("total time :{:.5f}s, latency :{:.5f}s, decoding step: {}, latency per request: {:5f}".format(total_time, total_time / num_decoding_steps, num_decoding_steps, total_time / num_eval_steps))
     return num_decoding_steps
 
 
@@ -108,7 +108,7 @@ def Sequoia(target_model : InferenceEngine, draft_model: InferenceEngine, datalo
             total_time += (t2 - t1)
             draft_model.clear_kv()
             target_model.clear_kv()
-    print("total time :{:.5f}s, latency :{:.5f}s, decoding step: {}, large model step: {}, {}".format(total_time, total_time / num_decoding_steps, num_decoding_steps, num_large_model_steps, num_decoding_steps / num_large_model_steps))
+    print("total time :{:.5f}s, latency :{:.5f}s, decoding step: {}, large model step: {}, accept rate: {:.5f}, latency per request: {:5f}".format(total_time, total_time / num_decoding_steps, num_decoding_steps, num_large_model_steps, num_decoding_steps / num_large_model_steps, total_time / num_eval_steps))
     return num_decoding_steps / num_large_model_steps
 
 
