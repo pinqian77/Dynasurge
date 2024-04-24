@@ -10,12 +10,12 @@ from model.Engine import InferenceEngine
 from utils.utils import _make_causal_mask, get_sampling_logits
 
 @torch.inference_mode()
-def Autoregressive(target_model : InferenceEngine, dataloader: DataLoader, T=0.6, top_p=0.9, max_length=512):
+def Autoregressive(target_model : InferenceEngine, dataloader: DataLoader, tokenizer, T=0.6, top_p=0.9, max_length=512, verbose=False):
     num_eval_steps = len(dataloader)
     num_decoding_steps = 0
     total_time = 0.0
 
-    for _, batch in tqdm(enumerate(dataloader), total=num_eval_steps):
+    for _, batch in tqdm(enumerate(dataloader), total=num_eval_steps):        
         input_ids = batch['input_ids'][..., :128]
         terminate = True if input_ids[0][-1] == 2 else False            
         position_ids = torch.arange(max_length).to('cuda:0').unsqueeze(0)
@@ -25,8 +25,23 @@ def Autoregressive(target_model : InferenceEngine, dataloader: DataLoader, T=0.6
         t1 = time.time()
         inner_decoding_step = 0
         start_length = 0
-        # Decode tokens until the maximum step is reached or termination is triggered
-        while inner_decoding_step < 32 and not terminate:
+
+        # if verbose:
+        #     input_text = (
+        #             tokenizer.decode(
+        #             input_ids[0], 
+        #             skip_special_tokens=True,
+        #             clean_up_tokenization_spaces=True,
+        #             space_between_special_tokens=False
+        #             )
+        #             .strip()
+        #             .split(" ")
+        #         )
+        #     print(" ".join(input_text), end=" ", flush=True)
+        
+        # pos = 0
+        # generated_ids = []
+        while inner_decoding_step < 128 and not terminate:
             # prefill for first token
             if inner_decoding_step == 0:
                 start_length = input_ids.shape[1]
@@ -50,6 +65,21 @@ def Autoregressive(target_model : InferenceEngine, dataloader: DataLoader, T=0.6
             # Check if the new token is the end-of-sequence token
             if input_ids[0][-1] == 2: 
                 terminate = True
+            
+            # if verbose:
+            #     generated_ids.extend(input_ids[0][-1:].tolist())
+            #     generated_text = (
+            #         tokenizer.decode(
+            #         generated_ids,
+            #         skip_special_tokens=True,
+            #         clean_up_tokenization_spaces=True,
+            #         space_between_special_tokens=False,
+            #         ).strip().split(" ")
+            #     )
+            #     now = len(generated_text) - 1
+            #     if now > pos:
+            #         print(" ".join(generated_text[pos:]), end=" ", flush=True)
+            #         pos = now
 
         torch.cuda.synchronize()
         t2 = time.time()
@@ -61,8 +91,9 @@ def Autoregressive(target_model : InferenceEngine, dataloader: DataLoader, T=0.6
 
 
 @torch.inference_mode()
-def Sequoia(target_model : InferenceEngine, draft_model: InferenceEngine, dataloader: DataLoader, T=0.6, top_p=0.9,
-            max_length=512, residual_graph=None, grow_map=None, sampling_callables = None, sample_gather_indices = None):
+def Sequoia(target_model : InferenceEngine, draft_model: InferenceEngine, dataloader: DataLoader, tokenizer, T=0.6, top_p=0.9,
+            max_length=512, bfs_verify=False, residual_graph=None, grow_map=None, sampling_callables=None, 
+            sample_gather_indices=None, verbose=False):
     num_eval_steps = len(dataloader)
     num_decoding_steps = 0
     num_large_model_steps = 0
@@ -74,40 +105,51 @@ def Sequoia(target_model : InferenceEngine, draft_model: InferenceEngine, datalo
     parents_buffer =  torch.zeros(max_length).long().to('cuda:0')
     position_ids = torch.zeros(max_length).long().to('cuda:0')
     
-    with torch.no_grad():
-        for step, batch in tqdm(enumerate(dataloader), total=num_eval_steps):
-            input_ids = batch['input_ids'][..., :128]
-            terminate = True if input_ids[0][-1] == 2 else False
-            draft_kv_len = 0
-            target_kv_len = 0
-            attn_mask.fill_(torch.finfo(dtype).min)
-            spectree = SpecTree(prefix=input_ids.squeeze(0), device='cuda:0', temperature=T,
-                                    top_p=top_p,
-                                    draft_kv_len=draft_kv_len, target_kv_len=target_kv_len,
-                                    draft_model_engine=draft_model, target_model_engine=target_model, max_length=max_length, grow_map=grow_map,
-                                    attn_mask = attn_mask, sequence = sequence, new_tokens_buffer = new_tokens_buffer, 
-                                    parents_buffer = parents_buffer, 
-                                    position_ids = position_ids,
-                                    residual_graph = residual_graph,
-                                    sampling_callables=sampling_callables,
-                                    sample_gather_indices = sample_gather_indices)
-            torch.cuda.synchronize()
-            t1 = time.time()
-            while input_ids.shape[1] < 256 and not terminate:
-                spectree.construct_grow_map()
-                valid_tokens, draft_kv_len, target_kv_len, terminate = spectree.verify()
-                
-                num_decoding_steps += (valid_tokens.shape[0] - input_ids.shape[1])
-                num_large_model_steps += 1
-                input_ids = valid_tokens.unsqueeze(0)
-                if (input_ids[0][-1] == 2) or (input_ids[0][-1] == 0): 
-                    terminate = True
+    for _, batch in tqdm(enumerate(dataloader), total=num_eval_steps):
+        input_ids = batch['input_ids'][..., :128]
+        terminate = True if input_ids[0][-1] == 2 else False
+        draft_kv_len = 0
+        target_kv_len = 0
+        attn_mask.fill_(torch.finfo(dtype).min)
+        spectree = SpecTree(prefix=input_ids.squeeze(0), device='cuda:0', temperature=T,
+                                top_p=top_p,
+                                draft_kv_len=draft_kv_len, target_kv_len=target_kv_len,
+                                draft_model_engine=draft_model, target_model_engine=target_model, max_length=max_length, grow_map=grow_map,
+                                attn_mask = attn_mask, sequence = sequence, new_tokens_buffer = new_tokens_buffer, 
+                                parents_buffer = parents_buffer, 
+                                position_ids = position_ids,
+                                residual_graph = residual_graph,
+                                sampling_callables=sampling_callables,
+                                sample_gather_indices = sample_gather_indices)
+        torch.cuda.synchronize()
+        t1 = time.time()
+
+        if verbose:
+            pass
+
+        while input_ids.shape[1] < 256 and not terminate:
+            spectree.construct_grow_map()
             
-            torch.cuda.synchronize()
-            t2 = time.time()
-            total_time += (t2 - t1)
-            draft_model.clear_kv()
-            target_model.clear_kv()
+            if not bfs_verify:
+                valid_tokens, draft_kv_len, target_kv_len, terminate = spectree.verify()
+            else:
+                valid_tokens, draft_kv_len, target_kv_len, terminate = spectree.verify_bfs()
+            
+            num_decoding_steps += (valid_tokens.shape[0] - input_ids.shape[1])
+            num_large_model_steps += 1
+            input_ids = valid_tokens.unsqueeze(0)
+            if (input_ids[0][-1] == 2) or (input_ids[0][-1] == 0): 
+                terminate = True
+
+            if verbose:
+                pass
+        
+        torch.cuda.synchronize()
+        t2 = time.time()
+        total_time += (t2 - t1)
+        draft_model.clear_kv()
+        target_model.clear_kv()
+        
     print("total time :{:.5f}s, latency :{:.5f}s, decoding step: {}, large model step: {}, accept rate: {:.5f}, latency per request: {:5f}".format(total_time, total_time / num_decoding_steps, num_decoding_steps, num_large_model_steps, num_decoding_steps / num_large_model_steps, total_time / num_eval_steps))
     return num_decoding_steps / num_large_model_steps
 

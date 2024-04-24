@@ -1,3 +1,4 @@
+from collections import deque
 import torch
 from torch.nn.functional import softmax
 from .Tree import Tree
@@ -157,6 +158,32 @@ class SpecTree(Tree):
         return (-1, p)
 
     @torch.inference_mode()
+    def accept_step_bfs(self, parent_id :int):
+        logits_id = parent_id - (self.ground_truth_len - 1)
+        p = self.target_logits[logits_id]
+        draft_logits = self.draft_logits[logits_id]
+        children = self.Successors[logits_id]
+
+        if len(children) == 0:
+            return (None, p)
+
+        val_children = []        
+        for pos in children:
+
+            token = self.tokens[pos + (self.ground_truth_len - 1)]
+            q = softmax(draft_logits / self.temperature, dim=-1)
+            r = self.r[pos + (self.ground_truth_len - 1)]
+            
+            if p[token] > r * q[token]:
+                val_children.append(pos + (self.ground_truth_len - 1))
+            else:
+                p = self.residual_graph(p, q)
+                draft_logits[token] = torch.finfo(self.dtype).min
+        if val_children:
+            return (val_children, None)
+        return (None, p)
+
+    @torch.inference_mode()
     def verify(self, benchmark = False):
         new_node_num = (self.num_nodes - self.ground_truth_len + 1)
         if self.target_kv_len == 0:
@@ -211,6 +238,7 @@ class SpecTree(Tree):
             else:
                 residual = res
                 break
+
         if benchmark:
             torch.cuda.synchronize()
             t3 = time.time()
@@ -240,8 +268,111 @@ class SpecTree(Tree):
                 t4 = time.time()
                 return self.tokens[:accept_length], accept_length, accept_length, t2 - t1, t3-t2, t4 - t3, terminal
              return self.tokens[:accept_length], accept_length, accept_length, terminal
+        
+    @torch.inference_mode()
+    def verify_bfs(self, benchmark = False):
+        new_node_num = (self.num_nodes - self.ground_truth_len + 1)
+        if self.target_kv_len == 0:
+            start_pos = 0
+            end_pos = self.num_nodes
+            attn_mask = self.attn_mask[start_pos: end_pos, :end_pos]
+            attn_mask = attn_mask[None, None, :, :].type(self.target_model_engine.dtype)
+            if benchmark:
+                torch.cuda.synchronize()
+                t1 = time.time()
+            target_model_outputs = self.target_model_engine.inference(input_ids = self.tokens[start_pos : end_pos].unsqueeze(0), 
+                                    position_ids = self.position_ids[start_pos : end_pos].unsqueeze(0), attn_mask = attn_mask, 
+                                    storage_ids=self.storage_ids[start_pos : end_pos])
+            if benchmark:
+                torch.cuda.synchronize()
+                t2 = time.time()
+            self.target_logits :torch.FloatTensor= target_model_outputs[0][self.ground_truth_len - 1:]
+            
+        else:
+            start_pos = self.target_kv_len
+            end_pos = self.num_nodes
+            attn_mask = self.attn_mask[start_pos: end_pos, :end_pos]
+            attn_mask = attn_mask[None, None, :, :].type(self.target_model_engine.dtype)
+            if benchmark:
+                torch.cuda.synchronize()
+                t1 = time.time()
+            target_model_outputs = self.target_model_engine.inference(input_ids = self.tokens[start_pos : end_pos].unsqueeze(0), 
+                                        position_ids =self.position_ids[start_pos : end_pos].unsqueeze(0), attn_mask = attn_mask,
+                                        storage_ids=self.storage_ids[start_pos : end_pos])
+            if benchmark:
+                torch.cuda.synchronize()
+                t2 = time.time()
+            self.target_logits :torch.FloatTensor = target_model_outputs[0][-(new_node_num):]
+        
+        assert len(self.target_logits) == (self.num_nodes - self.ground_truth_len + 1)
+
+        self.target_logits = get_sampling_logits(logits=self.target_logits, top_p=self.top_p, T=self.temperature, replicate=False)
+        
+        self.target_logits = softmax(self.target_logits / self.temperature, dim=-1)
+        
+        accept_list = self.seq_to_use[:self.ground_truth_len]
+        
+        terminal = False
+        paths = {}
+        curr_nodes = deque([(accept_list[-1],[accept_list[-1]])])  # Node and path as tuple
+        longest_path = []
+
+        while curr_nodes and not terminal:
+            parent, path = curr_nodes.popleft()
+            val_children, res = self.accept_step_bfs(parent_id=parent)
+            
+            if val_children:
+                paths[parent] = val_children
+                
+                for node in val_children:
+                    new_path = path + [node]
+                    curr_nodes.append((node, new_path))
+                    
+                    if len(new_path) > len(longest_path):
+                        longest_path = new_path
+                    
+                    if self.tokens[node] == 0 or self.tokens[node] == 2:
+                        terminal = True
+                        longest_path = new_path
+                        break
+            else:
+                residual = res
+        
+        accept_list += longest_path
+
+        if benchmark:
+            torch.cuda.synchronize()
+            t3 = time.time()
+        accept_length = len(accept_list)
+        if not terminal:
+            if torch.isnan(residual).any():
+                 terminal = True
+            else:
+                self.tokens[accept_length] = residual.multinomial(num_samples=1, replacement=True)
+
+        self.tokens[:accept_length] = self.tokens[accept_list]
+
+        self.draft_model_engine.kv_cache.gather_kv_incremental(accept_list[self.ground_truth_len:], self.ground_truth_len)
+        self.target_model_engine.kv_cache.gather_kv_incremental(accept_list[self.ground_truth_len:], self.ground_truth_len)
+
+        if not terminal:
+            if benchmark:
+                torch.cuda.synchronize()
+                t4 = time.time()
+                self.prepare_for_next_iter(accept_list, self.tokens[:accept_length+1])
+                return self.tokens[:accept_length+1], accept_length, accept_length, t2 - t1, t3-t2, t4 - t3, terminal
+            self.prepare_for_next_iter(accept_list, self.tokens[:accept_length+1])
+            return self.tokens[:accept_length+1], accept_length, accept_length, terminal
+        else:
+             if benchmark:
+                torch.cuda.synchronize()
+                t4 = time.time()
+                return self.tokens[:accept_length], accept_length, accept_length, t2 - t1, t3-t2, t4 - t3, terminal
+             return self.tokens[:accept_length], accept_length, accept_length, terminal
+        
     def verbose(self):
         super().verbose()
+
     def construct_grow_map(self, benchmark = False):
         if benchmark:
             sample_time = 0
@@ -279,211 +410,3 @@ class SpecTree(Tree):
         self.draft_logits[0] = draft_model_outputs[...,-1,:][0]
         self.draft_kv_len = self.num_nodes
         self.target_kv_len = len(accept_list)
-        
-
-
-        
-
-
-class SpecTreeTest(Tree):
-    def __init__(self, 
-                 draft_model_engine :InferenceEngine,
-                 target_model_engine :InferenceEngine,
-                 prefix :torch.LongTensor,
-                 temperature :float = 0.6,
-                 top_p: float = 0.9,
-                 draft_kv_len = 0,
-                 target_kv_len = 0,
-                 max_length = 256,
-                 max_width = 32,
-                 device :str = 'cpu',
-                 attn_mask = None, 
-                 sequence = None, 
-                 new_tokens_buffer = None, 
-                 parents_buffer = None, 
-                 position_ids = None) -> None:
-        
-        super().__init__(device=device, max_length=max_length)
-        assert self.max_length == draft_model_engine.max_length
-        self.max_width = max_width
-        self.draft_model_engine = draft_model_engine
-        self.target_model_engine = target_model_engine
-        self.temperature = temperature
-        self.top_p = top_p
-        
-        self.initialize(attn_mask, sequence, new_tokens_buffer, parents_buffer, position_ids, None)
-        self.set_prefix(prefix=prefix)
-        self.Successors = [list(range(1, self.max_width + 1))]
-        self.Successors.extend([[] for _ in range(self.max_width)])
-
-        self.attn_mask = self.full_attn_mask[:self.max_length, :self.max_length]
-        for idx in range(self.max_width):
-             self.attn_mask[idx + self.num_nodes] = self.attn_mask[self.num_nodes - 1]
-             self.attn_mask[idx + self.num_nodes][idx + self.num_nodes] = 0.0
-        
-        self.position_ids[self.num_nodes : self.num_nodes + self.max_width] = self.position_ids[self.num_nodes - 1] + 1
-        self.ground_truth_len = len(prefix)
-        self.r = torch.rand(len(position_ids)).to(self.device)
-        self.storage_ids = torch.arange(self.max_length).to(self.device)
-        
-        
-        if draft_kv_len == 0:
-            draft_model_outputs = self.draft_model_engine.inference(input_ids=self.tokens[:self.num_nodes].unsqueeze(0), 
-                                storage_ids=self.storage_ids[:self.num_nodes], 
-                                position_ids=self.position_ids[:self.num_nodes].unsqueeze(0),
-                                attn_mask=self.attn_mask[:self.num_nodes][None, None, :, :])
-            self.draft_logits :torch.FloatTensor= draft_model_outputs[...,-1,:]
-        
-        else:
-            draft_model_outputs = self.draft_model_engine.inference(input_ids = self.tokens[draft_kv_len: self.num_nodes].unsqueeze(0), 
-                                                    storage_ids=self.storage_ids[draft_kv_len: self.num_nodes],
-                                                    position_ids=self.position_ids[draft_kv_len: self.num_nodes].unsqueeze(0),
-                                                    attn_mask=self.attn_mask[draft_kv_len: self.num_nodes][None, None, :, :])
-            self.draft_logits :torch.FloatTensor = draft_model_outputs[...,-1,:]
-        self.draft_kv_len = self.num_nodes
-        
-        self.target_kv_len = target_kv_len
-        self.rand = torch.empty((self.max_width + 1, self.draft_logits.shape[1])).uniform_().to(self.device)
-        self.collective_grow_static([0], [self.max_width])
-    
-    @torch.inference_mode()
-    def collective_grow_static(self, idx_list :torch.LongTensor, n_branch_list :list[int], benchmark=False):
-        
-        
-        assert len(set(idx_list)) == len(idx_list)
-        assert len(self.draft_logits) == (self.num_nodes - self.ground_truth_len + 1)
-        
-        total_branch = sum(n_branch_list)
-        max_branch = max(n_branch_list)
-        sampling_logits = self.draft_logits[idx_list]
-        
-        sampling_q = softmax(sampling_logits / self.temperature, dim=-1)
-        
-            
-            
-        new_tokens_set  = (self.rand[idx_list].log()/sampling_q).topk(k=max_branch).indices
-        
-            
-        
-        finished_tokens = 0
-            
-        for i, idx in enumerate(idx_list):
-                n_branch = n_branch_list[i]
-                self.tokens[self.num_nodes + finished_tokens: self.num_nodes + finished_tokens + n_branch]  = new_tokens_set[i][:n_branch]
-                finished_tokens += n_branch
-            
-        
-        self.num_nodes = self.num_nodes + total_branch
-        
-
-        
-        start_pos = self.num_nodes - total_branch
-        end_pos = self.num_nodes
-        attn_mask = self.attn_mask[self.num_nodes - total_branch: self.num_nodes]
-        attn_mask = attn_mask[None, None, :, :]
-        
-        draft_model_outputs = self.draft_model_engine.inference(
-            input_ids = self.tokens[self.draft_kv_len: self.num_nodes].unsqueeze(0),
-            position_ids = self.position_ids[start_pos : end_pos].unsqueeze(0),
-            attn_mask = attn_mask,
-            storage_ids=self.storage_ids[self.draft_kv_len: self.num_nodes]
-            
-        )
-        self.draft_kv_len = self.num_nodes
-        self.draft_logits = torch.cat([self.draft_logits, draft_model_outputs[0][-total_branch:]], dim=0)
-        assert len(self.draft_logits) == (self.num_nodes - self.ground_truth_len + 1)
-        
-        return n_branch_list
-    @torch.inference_mode()
-    def accept_step(self, parent_id :int) ->ChildrenAccept:
-        logits_id = parent_id - (self.ground_truth_len - 1)
-        p = self.target_logits[logits_id]
-        
-        draft_logits = self.draft_logits[logits_id]
-        children = self.Successors[logits_id]
-        if len(children) == 0:
-            return ChildrenAccept(accept_mark=2, residual=p)
-        
-        for idx, pos in enumerate(children):
-
-            token = self.tokens[pos + (self.ground_truth_len - 1)]
-            q = softmax(draft_logits / self.temperature, dim=-1)
-            r = self.r[pos + (self.ground_truth_len - 1)]
-            if p[token] >= r * q[token]:
-                return ChildrenAccept(accept_mark=0, token=token, position=pos + (self.ground_truth_len - 1), successor_order=idx)
-            else:
-                p = get_residual(p, q)
-                draft_logits[token] = -torch.inf
-        
-        return ChildrenAccept(accept_mark=1, residual=p)
-
-
-        
-    @torch.inference_mode()
-    def verify(self, benchmark = False):
-        new_node_num = (self.num_nodes - self.ground_truth_len + 1)
-        if self.target_kv_len == 0:
-            start_pos = 0
-            end_pos = self.num_nodes
-            attn_mask = self.attn_mask[start_pos: end_pos, :end_pos]
-            attn_mask = attn_mask[None, None, :, :].type(self.target_model_engine.dtype)
-            target_model_outputs = self.target_model_engine.inference(input_ids = self.tokens[start_pos : end_pos].unsqueeze(0), 
-                                    position_ids = self.position_ids[start_pos : end_pos].unsqueeze(0), attn_mask = attn_mask, 
-                                    storage_ids=self.storage_ids[start_pos : end_pos])
-            self.target_logits :torch.FloatTensor= target_model_outputs[0][self.ground_truth_len - 1:]
-            
-        else:
-            start_pos = self.target_kv_len
-            end_pos = self.num_nodes
-            attn_mask = self.attn_mask[start_pos: end_pos, :end_pos]
-            attn_mask = attn_mask[None, None, :, :].type(self.target_model_engine.dtype)
-            target_model_outputs = self.target_model_engine.inference(input_ids = self.tokens[start_pos : end_pos].unsqueeze(0), 
-                                        position_ids =self.position_ids[start_pos : end_pos].unsqueeze(0), attn_mask = attn_mask,
-                                        storage_ids=self.storage_ids[start_pos : end_pos])
-            
-            self.target_logits :torch.FloatTensor = target_model_outputs[0][-(new_node_num):]
-        
-        assert len(self.draft_logits) == (self.num_nodes - self.ground_truth_len + 1)
-        assert len(self.target_logits) == (self.num_nodes - self.ground_truth_len + 1)
-        self.target_logits = get_sampling_logits(logits=self.target_logits, top_p=self.top_p, T=self.temperature, replicate=False)
-        self.target_logits = softmax(self.target_logits / self.temperature, dim=-1)
-        accept_list = list(range(self.ground_truth_len))
-        b = -1
-        terminal = False
-        while True:
-            parent_id = accept_list[-1]
-            children_accept = self.accept_step(parent_id=parent_id)
-            if children_accept.accept_mark == 0:
-                accept_list.append(children_accept.position)
-                b = children_accept.successor_order
-                if self.tokens[children_accept.position] == 2 or self.tokens[children_accept.position] == 0:
-                     terminal = True
-                     break
-            else:
-                residual = children_accept.residual
-                break
-        if not terminal:
-            if torch.isnan(residual).any():
-                 terminal = True
-            else:
-                last_token = residual.multinomial(num_samples=1, replacement=True)
-
-        
-        accept_tokens = self.tokens[accept_list]
-        if not terminal:
-            valid_tokens = torch.cat([accept_tokens, last_token], dim=-1)
-            
-            self.draft_model_engine.gather_kv(accept_list)
-            self.target_model_engine.gather_kv(accept_list)
-
-            return valid_tokens, len(accept_list), len(accept_list), b, terminal
-        else:
-            return accept_tokens, len(accept_list), len(accept_list), b, terminal
-    
-    def verbose(self):
-        super().verbose()
-
-    
-    
-
-                
