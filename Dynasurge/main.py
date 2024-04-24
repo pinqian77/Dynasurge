@@ -24,24 +24,24 @@ from utils.utils import cuda_graph_for_residual, cuda_graph_for_sampling_without
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', type=int, default=17, help='random seed')
+    parser.add_argument('--seed', type=int, default=25, help='random seed')
 
     parser.add_argument('--draft', type=str, help='draft model', default="JackFram/llama-68m")
     # parser.add_argument('--target', type=str, help='target model', default="huggyllama/llama-7b")
     parser.add_argument('--target', type=str, help='target model', default="JackFram/llama-68m")
 
-    parser.add_argument('--dataset', type=str, default="cnn", help='dataset') # support: (wiki, cnn)
+    parser.add_argument('--dataset', type=str, default="cnn", help='dataset')  # support: (wiki, cnn)
     parser.add_argument('--start', type=int, default=0, help='start')
     parser.add_argument('--end', type=int, default=200, help='end')
 
     parser.add_argument('--T', type=float, default=0.6, help='temperature')
     parser.add_argument('--P', type=float, default=0.9, help='top p')
     parser.add_argument('--M', type=int, default=384, help='max generation length')
-    parser.add_argument('--B', type=int, default=128, help='max draft token budget')
+    parser.add_argument('--B', type=int, default=32, help='max draft token budget')
 
-    parser.add_argument('--growmap', type=str, default="./utils/4x8-tree.pt", help='growmap path')
-
-    parser.add_argument('--mode', type=str, default="sTree", help='tree mode') # support: (auto, sTree, dTree)
+    parser.add_argument('--growmap', type=str, default="./growmaps/4x8-tree.pt", help='growmap path')
+    parser.add_argument('--vocab', type=int, default=32000, help='vocab size')
+    parser.add_argument('--mode', type=str, default="dTree", help='tree mode')  # support: (auto, sTree, dTree)
     args = parser.parse_args()
 
     print("===================================================")
@@ -49,36 +49,40 @@ def parse_arguments():
 
     return args
 
+
 def setup_seed(seed):
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-        torch.backends.cudnn.deterministic = True
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+
 
 if __name__ == "__main__":
     args = parse_arguments()
     setup_seed(args.seed)
-    
+
     ############ load models ############
     if args.target == "huggyllama/llama-7b":
-        target_model = InferenceEngine(max_length=args.M, model_name_or_path = args.target, dtype = torch.float16, draft=False)
+        target_model = InferenceEngine(max_length=args.M, model_name_or_path=args.target, dtype=torch.float16,
+                                       draft=False)
     elif args.target == "JackFram/llama-68m":
-        target_model = InferenceEngine(max_length=args.M, model_name_or_path = args.target, dtype = torch.float16, draft=False)
+        target_model = InferenceEngine(max_length=args.M, model_name_or_path=args.target, dtype=torch.float16,
+                                       draft=False)
     else:
         NotImplementedError("Unsupported target model")
-    
-    if args.draft == "JackFram/llama-68m" and args.mode != "auto":
-        draft_model = InferenceEngine(max_length=args.M, model_name_or_path = args.draft, dtype = torch.float16, draft=True)
 
+    if args.draft == "JackFram/llama-68m" and args.mode != "auto":
+        draft_model = InferenceEngine(max_length=args.M, model_name_or_path=args.draft, dtype=torch.float16, draft=True)
 
     ############ load dataset ############
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.target, use_fast=True)
     tokenizer.pad_token = tokenizer.eos_token
 
     eval_list = list(range(200, 2000))
     random.shuffle(eval_list)
-    tokenized_dataset = get_tokenized_dataset(tokenizer=tokenizer, dataset_name=args.dataset).select(eval_list[args.start :args.end])
+    tokenized_dataset = get_tokenized_dataset(tokenizer=tokenizer, dataset_name=args.dataset).select(
+        eval_list[args.start:args.end])
     dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=False)
 
     accelerator = Accelerator()
@@ -90,13 +94,13 @@ if __name__ == "__main__":
 
     elif args.mode == "sTree":
         residual_graph = cuda_graph_for_residual()
-        
+
         grow_map = torch.load(args.growmap)
         tree_size = grow_map["size"]
         idx_lists = grow_map["roots"]
         branch_lists = grow_map['branches']
         draft_step = len(grow_map["roots"])
-        
+
         # graph_capture_list = [sum(x) for x in branch_lists]
         # graph_capture_list.append(1)
         # draft_model.initialize_cuda_graph(graph_capture_list)
@@ -107,7 +111,7 @@ if __name__ == "__main__":
             num_samples = max(branch_lists[i])
             sampling_callables[i] = cuda_graph_for_sampling_without_replacement(
                 max_length=args.M, idx_len=idx_len, num_samples=num_samples,
-                temperature=args.T, tree_size=tree_size) 
+                temperature=args.T, tree_size=tree_size)
         for i in range(draft_step - 1):
             ith_gather_list = []
             max_num_samples = max(branch_lists[i])
@@ -119,8 +123,30 @@ if __name__ == "__main__":
             sample_gather_indices[i] = ith_gather_list
 
         Sequoia(target_model=target_model, draft_model=draft_model, dataloader=dataloader, T=args.T, top_p=args.P,
-                max_length=args.M, residual_graph = residual_graph, grow_map = grow_map, sampling_callables=sampling_callables, 
-                sample_gather_indices = sample_gather_indices)
-        
+                max_length=args.M, residual_graph=residual_graph, grow_map=grow_map,
+                sampling_callables=sampling_callables,
+                sample_gather_indices=sample_gather_indices)
+
     elif args.mode == "dTree":
-        pass
+        gamma_to_subnode_nums = {}
+        for i in range(1, 100):
+            if i <= 1:
+                gamma_to_subnode_nums[i] = 1
+            elif i <= 6:
+                gamma_to_subnode_nums[i] = 2
+            elif i <= 39:
+                gamma_to_subnode_nums[i] = 3
+            else:
+                gamma_to_subnode_nums[i] = 4
+
+        args.tree_max_subnodes = gamma_to_subnode_nums[args.B]
+
+
+        sampling_callables = {}
+        sample_gather_indices = {}
+        residual_graph = cuda_graph_for_residual()
+
+        Dynasurge(target_model=target_model, draft_model=draft_model, dataloader=dataloader, T=args.T, top_p=args.P,
+                max_length=args.M, residual_graph=residual_graph,
+                sampling_callables=sampling_callables,
+                sample_gather_indices=sample_gather_indices, tokenizer=tokenizer ,args=args)
