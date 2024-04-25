@@ -24,28 +24,26 @@ from utils.utils import cuda_graph_for_residual, cuda_graph_for_sampling_without
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', type=int, default=17, help='random seed')
-    parser.add_argument('--verbose', action='store_true', help='verbose mode')
-
-    parser.add_argument('--draft', type=str, help='draft model', default="JackFram/llama-68m")
-    parser.add_argument('--target', type=str, help='target model', default="huggyllama/llama-7b")
-
-    parser.add_argument('--dataset', type=str, default="cnn", help='dataset') # support: (wiki, cnn)
-    parser.add_argument('--start', type=int, default=0, help='start')
-    parser.add_argument('--end', type=int, default=200, help='end')
+    parser.add_argument('--use_bfs', action='store_true', help='use BFS for tree verification')
+    parser.add_argument('--mode', type=str, default="sTree", help='tree mode') # support: (auto, sTree, dTree)
 
     parser.add_argument('--T', type=float, default=0.6, help='temperature')
     parser.add_argument('--P', type=float, default=0.9, help='top p')
     parser.add_argument('--M', type=int, default=384, help='max generation length')
     parser.add_argument('--B', type=int, default=128, help='max draft token budget')
 
-    parser.add_argument('--use_bfs', action='store_true', help='use BFS for tree verification')
-    parser.add_argument('--mode', type=str, default="sTree", help='tree mode') # support: (auto, sTree, dTree)
+    parser.add_argument('--dataset', type=str, default="cnn", help='dataset') # support: (wiki, cnn)
+    parser.add_argument('--start', type=int, default=0, help='start')
+    parser.add_argument('--end', type=int, default=200, help='end')
 
+    parser.add_argument('--draft', type=str, help='draft model', default="JackFram/llama-68m")
+    parser.add_argument('--target', type=str, help='target model', default="huggyllama/llama-7b")
+
+    parser.add_argument('--vocab', type=int, default=32000, help='vocab size')
     parser.add_argument('--growmap', type=str, help='growmap path')
+    parser.add_argument('--verbose', action='store_true', help='verbose mode')
+    parser.add_argument('--seed', type=int, default=17, help='random seed')
     args = parser.parse_args()
-    print(args)
-
     return args
 
 def setup_seed(seed):
@@ -85,7 +83,7 @@ if __name__ == "__main__":
 
     ############# simulation setting #############
     if args.mode == "auto":
-        Autoregressive(target_model=target_model, dataloader=dataloader, tokenizer=tokenizer, T=args.T, top_p=args.P, max_length=args.M, verbose=args.verbose)
+        Autoregressive(target_model=target_model, dataloader=dataloader, tokenizer=tokenizer, T=args.T, top_p=args.P, max_length=args.M, verbose=args.verbose, args=args)
 
     elif args.mode == "sTree":
         residual_graph = cuda_graph_for_residual()
@@ -116,7 +114,28 @@ if __name__ == "__main__":
 
         Sequoia(target_model=target_model, draft_model=draft_model, dataloader=dataloader, tokenizer=tokenizer, T=args.T, top_p=args.P,
                 max_length=args.M, bfs_verify=args.use_bfs, residual_graph = residual_graph, grow_map = grow_map, sampling_callables=sampling_callables, 
-                sample_gather_indices = sample_gather_indices, verbose=args.verbose)
+                sample_gather_indices = sample_gather_indices, verbose=args.verbose, args=args)
         
     elif args.mode == "dTree":
-        pass
+        gamma_to_subnode_nums = {}
+        for i in range(1, 256):
+            if i <= 1:
+                gamma_to_subnode_nums[i] = 1
+            elif i <= 6:
+                gamma_to_subnode_nums[i] = 2
+            elif i <= 39:
+                gamma_to_subnode_nums[i] = 3
+            else:
+                gamma_to_subnode_nums[i] = 4
+
+        args.tree_max_subnodes = gamma_to_subnode_nums[args.B]
+
+
+        sampling_callables = {}
+        sample_gather_indices = {}
+        residual_graph = cuda_graph_for_residual()
+
+        Dynasurge(target_model=target_model, draft_model=draft_model, dataloader=dataloader, T=args.T, top_p=args.P,
+                max_length=args.M, residual_graph=residual_graph,
+                sampling_callables=sampling_callables,
+                sample_gather_indices=sample_gather_indices, tokenizer=tokenizer, args=args, bfs_verify=args.use_bfs, verbose=args.verbose)
