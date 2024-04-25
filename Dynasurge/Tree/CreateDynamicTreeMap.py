@@ -55,7 +55,7 @@ def create_tree_map(draft_model, input_ids, max_subnodes_num, max_token_for_tree
     current_node_num = len(input_ids)
 
     # prevent over generate
-    max_token_for_tree = min(max_token_for_tree, max_length - current_node_num)
+    max_token_for_tree = min(max_token_for_tree, max_length - current_node_num - 1)
 
     prefix_len = len(input_ids)
     node_id_map = {}
