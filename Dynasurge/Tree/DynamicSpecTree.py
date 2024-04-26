@@ -302,7 +302,8 @@ class DynamicSpecTree(Tree):
             else:
                 residual = res
         
-        accept_list += longest_path
+        if longest_path:
+            accept_list += longest_path[1:]
 
         if benchmark:
             torch.cuda.synchronize()
