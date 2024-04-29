@@ -3,7 +3,7 @@
 mkdir -p log
 log_file="log/$(date +%Y%m%d%H%M)_results.log"
 
-END=2
+END=200
 VERBOSE_MODE=""
 # VERBOSE_MODE="--verbose"
 
