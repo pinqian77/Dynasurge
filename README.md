@@ -10,12 +10,14 @@ Dynasurge introduces a dynamic token tree construction algorithm optimized for p
 ## Experimental Setup
 
 ### Model
-Dynasurge's performance evaluations utilize the LLaMA model family. For generating draft tokens, we use the JackFram/Llama68m (JF68m). Verification and autoregressive generation tasks are carried out using the LLaMA-7B model.
+Dynasurge's performance evaluations utilize the LLaMA model family. 
+- **JackFram/Llama68m** for generating draft tokens
+- **LLaMA2-7B** as target model
 
 ### Dataset
 We conduct evaluations using two significant datasets to ensure the statistical significance and broad applicability of our results:
-- **C4 (en) validation dataset**: Provides a diverse range of text for assessing general language understanding and decoding.
-- **CNN DailyMail dataset**: Focuses on news summaries, testing Dynasurge's efficiency in handling structured data.
+- **C4 (en) validation dataset**
+- **CNN DailyMail dataset**
 
 Each dataset involves testing 200 examples, with prompt and generation lengths set to 128 tokens to standardize the evaluation of different decoding strategies.
 
@@ -31,8 +33,8 @@ You can simply run `bash eval.sh` after set up the environmemnt.
 ## Env Setup
 Create and activate a new environment with the required dependencies:
 ```bash
-conda create -n Dynasurge python=3.11
-conda activate Dynasurge
+conda create -n dynasurge python=3.11
+conda activate dynasurge
 
 pip install -r requirements.txt
 ```
