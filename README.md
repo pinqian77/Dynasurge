@@ -12,7 +12,7 @@ Dynasurge introduces a dynamic token tree construction algorithm optimized for p
 ### Model
 Dynasurge's performance evaluations utilize the LLaMA model family. 
 - **JackFram/Llama68m** for generating draft tokens
-- **LLaMA2-7B** as target model
+- **LLaMA2-7B** for verification and autoregressive generation task
 
 ### Dataset
 We conduct evaluations using two significant datasets to ensure the statistical significance and broad applicability of our results:
